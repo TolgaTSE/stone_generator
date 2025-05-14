@@ -6,7 +6,22 @@ import io
 import os
 from datetime import datetime
 
+# Increase PIL image size limit
+Image.MAX_IMAGE_PIXELS = None  # Add this line at the top
+
+def resize_if_needed(image, max_size=3000):
+    """Resize image if it's too large"""
+    width, height = image.size
+    if width > max_size or height > max_size:
+        ratio = min(max_size/width, max_size/height)
+        new_size = (int(width*ratio), int(height*ratio))
+        return image.resize(new_size, Image.LANCZOS)
+    return image
+
 def create_variation(image):
+    # Resize image if it's too large
+    image = resize_if_needed(image)
+    
     # Convert PIL Image to OpenCV format
     img_array = np.array(image)
     
@@ -51,48 +66,51 @@ def main():
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
     
     if uploaded_file is not None:
-        # Display original image
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Original Image", use_column_width=True)
-        
-        # Create button
-        if st.button("Generate Variations"):
-            # Create directory for saving images if it doesn't exist
-            if not os.path.exists("generated_images"):
-                os.makedirs("generated_images")
+        try:
+            # Display original image
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Original Image", use_column_width=True)
             
-            # Generate 8 variations
-            variations = []
-            for i in range(8):
-                variation = create_variation(image)
-                variations.append(variation)
+            # Create button
+            if st.button("Generate Variations"):
+                # Create directory for saving images if it doesn't exist
+                if not os.path.exists("generated_images"):
+                    os.makedirs("generated_images")
                 
-                # Save image
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"generated_images/variation_{i+1}_{timestamp}.png"
-                variation.save(filename, "PNG", dpi=(300, 300))
-            
-            # Display variations in 2x4 grid
-            col1, col2, col3, col4 = st.columns(4)
-            col5, col6, col7, col8 = st.columns(4)
-            
-            cols = [col1, col2, col3, col4, col5, col6, col7, col8]
-            
-            for idx, (variation, col) in enumerate(zip(variations, cols)):
-                with col:
-                    st.image(variation, caption=f"Variation {idx+1}", use_column_width=True)
+                # Generate 8 variations
+                variations = []
+                for i in range(8):
+                    variation = create_variation(image)
+                    variations.append(variation)
                     
-                    # Convert image to bytes for download
-                    buf = io.BytesIO()
-                    variation.save(buf, format="PNG", dpi=(300, 300))
-                    byte_im = buf.getvalue()
-                    
-                    st.download_button(
-                        label=f"Download #{idx+1}",
-                        data=byte_im,
-                        file_name=f"variation_{idx+1}.png",
-                        mime="image/png"
-                    )
+                    # Save image
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"generated_images/variation_{i+1}_{timestamp}.png"
+                    variation.save(filename, "PNG", dpi=(300, 300))
+                
+                # Display variations in 2x4 grid
+                col1, col2, col3, col4 = st.columns(4)
+                col5, col6, col7, col8 = st.columns(4)
+                
+                cols = [col1, col2, col3, col4, col5, col6, col7, col8]
+                
+                for idx, (variation, col) in enumerate(zip(variations, cols)):
+                    with col:
+                        st.image(variation, caption=f"Variation {idx+1}", use_column_width=True)
+                        
+                        # Convert image to bytes for download
+                        buf = io.BytesIO()
+                        variation.save(buf, format="PNG", dpi=(300, 300))
+                        byte_im = buf.getvalue()
+                        
+                        st.download_button(
+                            label=f"Download #{idx+1}",
+                            data=byte_im,
+                            file_name=f"variation_{idx+1}.png",
+                            mime="image/png"
+                        )
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
     main()
