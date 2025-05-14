@@ -9,96 +9,92 @@ from datetime import datetime
 # Increase PIL image size limit
 Image.MAX_IMAGE_PIXELS = None
 
-def segment_flakes(image):
-    # Convert to numpy array
-    img_array = np.array(image)
-    
-    # Convert to LAB color space for better segmentation
-    lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
-    
-    # Split channels
-    l, a, b = cv2.split(lab)
-    
-    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    l = clahe.apply(l)
-    
-    # Threshold to find flakes
-    _, thresh = cv2.threshold(l, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # Noise removal
-    kernel = np.ones((3,3), np.uint8)
-    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
-    
-    # Sure background area
-    sure_bg = cv2.dilate(opening, kernel, iterations=3)
-    
-    # Finding sure foreground area
-    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
-    _, sure_fg = cv2.threshold(dist_transform, 0.5*dist_transform.max(), 255, 0)
-    sure_fg = np.uint8(sure_fg)
-    
-    return sure_fg, sure_bg
+def resize_for_processing(image, target_size=2000):
+    """Resize image for processing while maintaining aspect ratio"""
+    width, height = image.size
+    ratio = min(target_size/width, target_size/height)
+    new_size = (int(width*ratio), int(height*ratio))
+    return image.resize(new_size, Image.LANCZOS)
 
-def create_variation(image):
-    # Convert PIL Image to numpy array
+def segment_flakes(image, chunk_size=1000):
+    """Process image in chunks to save memory"""
+    # Convert to numpy array
     img_array = np.array(image)
     height, width = img_array.shape[:2]
     
-    # Get flake masks
-    flake_mask, bg_mask = segment_flakes(image)
+    # Process in chunks
+    result = np.zeros((height, width), dtype=np.uint8)
     
-    # Create new image starting with original
+    for y in range(0, height, chunk_size):
+        for x in range(0, width, chunk_size):
+            # Get chunk coordinates
+            y2 = min(y + chunk_size, height)
+            x2 = min(x + chunk_size, width)
+            
+            # Process chunk
+            chunk = img_array[y:y2, x:x2]
+            
+            # Convert chunk to LAB
+            chunk_lab = cv2.cvtColor(chunk, cv2.COLOR_RGB2LAB)
+            
+            # Get L channel
+            l_channel = chunk_lab[:, :, 0]
+            
+            # Threshold
+            _, thresh = cv2.threshold(l_channel, 127, 255, cv2.THRESH_OTSU)
+            
+            # Save result
+            result[y:y2, x:x2] = thresh
+    
+    return result
+
+def create_variation(original_image):
+    # Resize for processing
+    process_image = resize_for_processing(original_image)
+    
+    # Get flake mask
+    flake_mask = segment_flakes(process_image)
+    
+    # Convert back to original size
+    flake_mask = cv2.resize(flake_mask, original_image.size[::-1])
+    
+    # Convert original image to numpy array
+    img_array = np.array(original_image)
+    
+    # Create new image
     new_image = img_array.copy()
     
-    # Find connected components (flakes)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(flake_mask, connectivity=8)
+    # Find connected components
+    num_labels, labels = cv2.connectedComponents(flake_mask)
     
-    # Create list of flakes
-    flakes = []
-    for i in range(1, num_labels):  # Skip background (0)
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
-        area = stats[i, cv2.CC_STAT_AREA]
+    # Create random order for relocation
+    order = np.arange(1, num_labels)
+    np.random.shuffle(order)
+    
+    # Relocate each component
+    height, width = img_array.shape[:2]
+    for label in order:
+        # Get component mask
+        mask = (labels == label)
         
-        # Filter out very small or very large components
-        if 100 < area < (width * height) // 20:
-            mask = (labels == i).astype(np.uint8)
-            flake = img_array.copy()
-            flake[mask == 0] = 0
-            flakes.append({
-                'image': flake[y:y+h, x:x+w],
-                'mask': mask[y:y+h, x:x+w],
-                'width': w,
-                'height': h
-            })
-    
-    # Create placement mask
-    placement_mask = np.zeros((height, width), dtype=np.uint8)
-    
-    # Random placement of flakes
-    np.random.shuffle(flakes)
-    for flake in flakes:
-        for _ in range(20):  # Try 20 times to place each flake
-            new_x = np.random.randint(0, width - flake['width'])
-            new_y = np.random.randint(0, height - flake['height'])
+        if np.sum(mask) > 100:  # Skip very small components
+            # Get component bounds
+            y, x = np.where(mask)
+            top, bottom = np.min(y), np.max(y)
+            left, right = np.min(x), np.max(x)
             
-            # Check if area is available
-            roi = placement_mask[new_y:new_y+flake['height'], 
-                               new_x:new_x+flake['width']]
+            # Get component
+            component = img_array[top:bottom+1, left:right+1].copy()
+            component_mask = mask[top:bottom+1, left:right+1]
             
-            if np.sum(roi) == 0:  # If area is free
-                # Place flake
-                new_image[new_y:new_y+flake['height'], 
-                         new_x:new_x+flake['width']][flake['mask'] > 0] = \
-                    flake['image'][flake['mask'] > 0]
-                
-                # Update placement mask
-                placement_mask[new_y:new_y+flake['height'], 
-                             new_x:new_x+flake['width']] = flake['mask']
-                break
+            # Find new position
+            h, w = bottom-top+1, right-left+1
+            new_x = np.random.randint(0, max(1, width - w))
+            new_y = np.random.randint(0, max(1, height - h))
+            
+            # Place component
+            new_image[new_y:new_y+h, new_x:new_x+w][component_mask] = \
+                component[component_mask]
     
     return Image.fromarray(new_image)
 
