@@ -109,48 +109,37 @@ def main():
             image = Image.open(uploaded_file)
             st.image(image, caption="Original Image", use_column_width=True)
             
-            if st.button("Generate Variations"):
+            if st.button("Generate New Design"):
+                progress_text = st.empty()
+                progress_text.text("Generating new design...")
+                
+                # Generate single variation
+                variation = create_variation(image)
+                
+                # Save image
                 if not os.path.exists("generated_images"):
                     os.makedirs("generated_images")
-                
-                variations = []
-                progress_text = st.empty()
-                progress_bar = st.progress(0)
-                
-                for i in range(8):
-                    progress_text.text(f"Generating variation {i+1}/8...")
-                    variation = create_variation(image)
-                    variations.append(variation)
                     
-                    # Save image
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"generated_images/variation_{i+1}_{timestamp}.png"
-                    variation.save(filename, "PNG", dpi=(300, 300))
-                    
-                    progress_bar.progress((i + 1) / 8)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"generated_images/variation_{timestamp}.png"
+                variation.save(filename, "PNG", dpi=(300, 300))
                 
-                # Display variations in grid
-                col1, col2, col3, col4 = st.columns(4)
-                col5, col6, col7, col8 = st.columns(4)
-                cols = [col1, col2, col3, col4, col5, col6, col7, col8]
+                # Display variation
+                st.image(variation, caption="New Design", use_column_width=True)
                 
-                for idx, (variation, col) in enumerate(zip(variations, cols)):
-                    with col:
-                        st.image(variation, caption=f"Variation {idx+1}", 
-                                use_column_width=True)
-                        
-                        buf = io.BytesIO()
-                        variation.save(buf, format="PNG", dpi=(300, 300))
-                        byte_im = buf.getvalue()
-                        
-                        st.download_button(
-                            label=f"Download #{idx+1}",
-                            data=byte_im,
-                            file_name=f"variation_{idx+1}.png",
-                            mime="image/png"
-                        )
+                # Download button
+                buf = io.BytesIO()
+                variation.save(buf, format="PNG", dpi=(300, 300))
+                byte_im = buf.getvalue()
                 
-                progress_text.text("All variations generated successfully!")
+                st.download_button(
+                    label="Download New Design",
+                    data=byte_im,
+                    file_name=f"new_design_{timestamp}.png",
+                    mime="image/png"
+                )
+                
+                progress_text.text("New design generated successfully!")
                 
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
