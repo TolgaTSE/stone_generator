@@ -10,33 +10,39 @@ import gc
 # Increase PIL image size limit
 Image.MAX_IMAGE_PIXELS = None
 
+import tifffile
+
 def load_large_image(uploaded_file):
-    """Handle large TIFF files using PIL with chunks"""
+    """Handle large TIFF files using tifffile"""
     try:
-        # Save the file temporarily
-        temp_path = "temp_image.tif"
+        # Save to temporary file
+        temp_path = "temp.tif"
         with open(temp_path, "wb") as f:
-            f.write(uploaded_file.getvalue())
+            f.write(uploaded_file.getbuffer())
         
-        # Open with PIL
-        with Image.open(temp_path) as img:
-            # Convert to RGB
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            # Load full image
-            img.load()
-            # Make a copy
-            final_image = img.copy()
+        # Read with tifffile
+        img_array = tifffile.imread(temp_path)
         
         # Remove temporary file
         os.remove(temp_path)
         
-        return final_image
+        # Convert to RGB if needed
+        if len(img_array.shape) == 2:  # If grayscale
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+        elif len(img_array.shape) == 3 and img_array.shape[2] > 3:  # If RGBA
+            img_array = img_array[:, :, :3]
+        
+        # Convert to PIL Image
+        image = Image.fromarray(img_array)
+        
+        return image
             
     except Exception as e:
         st.error(f"Error loading image: {str(e)}")
         st.error(f"File size: {uploaded_file.size / (1024*1024):.2f} MB")
         return None
+
+
 
 def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, color_sensitivity):
     try:
