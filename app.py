@@ -6,7 +6,18 @@ import io
 import os
 from datetime import datetime
 import tifffile
-import gc  # Garbage collector for memory management
+import gc
+import psutil  # Add this import
+
+# Configure Streamlit for large files
+st.set_option('server.maxUploadSize', 2048)
+
+# Add memory monitoring
+def get_memory_usage():
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024  # Convert to MB
+
+# Rest of your code remains the same...
 
 # Increase PIL image size limit
 Image.MAX_IMAGE_PIXELS = None
