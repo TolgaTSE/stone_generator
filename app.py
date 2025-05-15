@@ -2,6 +2,7 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image, ImageCms
+import imageio.v2 as imageio
 import io
 import os
 from datetime import datetime
@@ -15,43 +16,62 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# PIL için limitsiz piksel boyutu
-Image.MAX_IMAGE_PIXELS = None
+Image.MAX_IMAGE_PIXELS = None  # PIL için limitsiz piksel
 
 def load_large_image(uploaded_file):
-    """TIFF içindeki gömülü ICC profiline göre CMYK→sRGB dönüşümü yapar,
-       spot-kanalları atar ve doğru renk tonlarını elde eder."""
+    """Önce imageio, sonra PIL/ICC, sonra tifffile+manuel CMYK→RGB ile yükleme."""
     temp_path = "temp.tif"
     try:
-        # Geçici dosyaya yaz
+        # 1) Diske yaz
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # tifffile ile oku
+        # 2) Önce imageio ile oku (fotoğrafçı yazılımlar gibi otomatik kompozit)
+        try:
+            arr = imageio.imread(temp_path)
+            st.success("Yüklendi via imageio.imread!")
+            img = Image.fromarray(arr)
+            os.remove(temp_path)
+            return img
+        except Exception as e_imgio:
+            st.write("imageio.imread başarısız:", e_imgio)
+
+        # 3) PIL ile doğrudan açmayı dene (bazı TIFF’lerde işe yarar)
+        try:
+            with Image.open(temp_path) as pil_img:
+                rgb = pil_img.convert("RGB")
+                st.success("Yüklendi via PIL composite!")
+                os.remove(temp_path)
+                return rgb
+        except Exception as e_pil:
+            st.write("PIL composite başarısız:", e_pil)
+
+        # 4) tifffile ile ham veriyi al
         with tifffile.TiffFile(temp_path) as tif:
             page = tif.pages[0]
-            arr = page.asarray()  # (H, W, C) veya planar
+            arr = page.asarray()  # tüm kanallar
             tags = page.tags
 
-        # Fazla boyutları bırak
+        st.write(f"Ham dizi shape: {arr.shape}, dtype={arr.dtype}")
+
+        # 5) Fazla boyutları temizle ve planar→interleaved
         arr = np.squeeze(arr)
-        # Planar geldi ise (C, H, W) → (H, W, C)
         if arr.ndim == 3 and arr.shape[0] in (3, 4, 8):
             arr = np.transpose(arr, (1, 2, 0))
+        st.write(f"İşlenmiş dizi shape: {arr.shape}")
 
-        # Gömülü ICC profili çek
+        # 6) Gömülü ICC profili oku
         icc_profile = None
         if "ICCProfile" in tags:
             icc_profile = tags["ICCProfile"].value
+            st.write("ICCProfile bulundu, renk yönetimi uygulanacak.")
 
-        # CMYK veya CMYK+spot (ilk 4 kanal) → RGB
+        # 7) Kanal sayısına göre dönüştür
         if arr.ndim == 3 and arr.shape[2] >= 4:
-            # Sadece temel 4 kanal
+            # İlk 4 kanal = CMYK
             cmyk_arr = arr[..., :4].astype(np.uint8)
-
             if icc_profile:
-                # ICC profille renk yönetimi
+                # ICC profille CMYK→RGB
                 cmyk_img = Image.fromarray(cmyk_arr, mode="CMYK")
                 in_prof = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
                 out_prof = ImageCms.createProfile("sRGB")
@@ -60,7 +80,7 @@ def load_large_image(uploaded_file):
                 )
                 image = rgb_img
             else:
-                # Manuel CMYK→RGB
+                # Manuel formülle CMYK→RGB
                 cmyk = cmyk_arr.astype(float) / 255.0
                 c, m, y, k = cv2.split(cmyk)
                 r = (1 - c)*(1 - k)
@@ -70,19 +90,16 @@ def load_large_image(uploaded_file):
                 image = Image.fromarray(rgb)
 
         elif arr.ndim == 3 and arr.shape[2] == 3:
-            # Zaten RGB
-            image = Image.fromarray(arr)
-
+            image = Image.fromarray(arr)  # zaten RGB
         elif arr.ndim == 2:
-            # Grayscale
-            image = Image.fromarray(arr)
-
+            image = Image.fromarray(arr)  # grayscale
         else:
             st.error(f"Beklenmeyen dizi formatı: {arr.shape}")
-            return None
+            image = None
 
         os.remove(temp_path)
-        st.success("Görüntü başarıyla yüklendi!")
+        if image:
+            st.success("Görüntü başarıyla yüklendi via tifffile fallback!")
         return image
 
     except Exception as e:
@@ -141,7 +158,6 @@ def save_large_image(image, filename):
 
 def main():
     st.title("Stone Pattern Generator")
-
     uploaded_file = st.file_uploader("Bir TIFF dosyası seçin...", type=["tif", "tiff"])
     if uploaded_file:
         st.write(f"Dosya: {uploaded_file.name}  •  Boyut: {uploaded_file.size/(1024*1024):.2f} MB")
@@ -150,7 +166,6 @@ def main():
 
         if image:
             st.image(image, caption="Orijinal Görüntü", use_column_width=True)
-
             st.sidebar.header("Desen Kontrolleri")
             redistribution_intensity = st.sidebar.slider(
                 "Dağıtım Şiddeti", 0.1, 1.0, 0.5,
