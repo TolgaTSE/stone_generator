@@ -7,7 +7,11 @@ import os
 from datetime import datetime
 import tifffile
 import gc
-import psutil  # Add this import
+
+# Configure Streamlit for large files
+st.set_option('server.maxUploadSize', 2048)
+
+# Rest of your existing code stays the same...
 
 # Configure Streamlit for large files
 st.set_option('server.maxUploadSize', 2048)
