@@ -22,18 +22,15 @@ def load_large_image(uploaded_file):
     """TIFF'i önce PIL ile CMYK→RGB olarak yükler, başarısız olursa tifffile+manuel dönüşüm yapar."""
     temp_path = "temp.tif"
     try:
-        # Dosyayı geçici olarak diske yaz
+        # Geçici dosyayı diske yaz
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # 1) PIL ile açmayı dene
+        # 1) PIL ile açmayı dene ve CMYK’yı RGB’ye çevir
         try:
             with Image.open(temp_path) as img:
                 img.load()
-                if img.mode == 'CMYK':
-                    rgb = img.convert('RGB')
-                else:
-                    rgb = img.convert('RGB')
+                rgb = img.convert('RGB')
                 st.success("Yüklendi via PIL (CMYK→RGB)!")
                 os.remove(temp_path)
                 return rgb
@@ -53,7 +50,7 @@ def load_large_image(uploaded_file):
             arr = np.transpose(arr, (1, 2, 0))
         st.write(f"Processed array shape: {arr.shape}")
 
-        # Manuel CMYK→RGB dönüşüm
+        # Manuel CMYK→RGB dönüşümü
         cmyk = arr.astype(float) / 255.0
         c, m, y, k = cv2.split(cmyk)
         r = (1 - c) * (1 - k)
@@ -114,12 +111,20 @@ def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, co
         return None
 
 
-def save_large_image(image, filename):
-    """PNG olarak kaydeder."""
+def save_png(image, filename):
+    """PNG formatında kaydeder."""
     try:
         image.save(filename, "PNG", dpi=(300, 300))
     except Exception as e:
-        st.error(f"Kaydetme hatası: {e}")
+        st.error(f"PNG kaydetme hatası: {e}")
+
+
+def save_tiff(image, filename):
+    """TIFF formatında kaydeder."""
+    try:
+        image.save(filename, "TIFF", dpi=(300, 300))
+    except Exception as e:
+        st.error(f"TIFF kaydetme hatası: {e}")
 
 
 def main():
@@ -155,17 +160,33 @@ def main():
                         color_sensitivity
                     )
                     if variation is not None:
+                        # Klasör oluştur
                         os.makedirs("generated_images", exist_ok=True)
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fn = f"generated_images/variation_{ts}.png"
-                        save_large_image(variation, fn)
+                        png_path = f"generated_images/variation_{ts}.png"
+                        tiff_path = f"generated_images/variation_{ts}.tif"
+
+                        # PNG ve TIFF olarak kaydet
+                        save_png(variation, png_path)
+                        save_tiff(variation, tiff_path)
+
+                        # Görüntü göster
                         st.image(variation, caption="Yeni Tasarım", use_column_width=True)
-                        with open(fn, "rb") as f:
+
+                        # İndir butonları
+                        with open(png_path, "rb") as f:
                             st.download_button(
-                                label="Tasarımı İndir",
+                                label="PNG İndir",
                                 data=f,
-                                file_name=f"new_design_{ts}.png",
+                                file_name=os.path.basename(png_path),
                                 mime="image/png"
+                            )
+                        with open(tiff_path, "rb") as f:
+                            st.download_button(
+                                label="TIFF İndir",
+                                data=f,
+                                file_name=os.path.basename(tiff_path),
+                                mime="image/tiff"
                             )
 
 if __name__ == "__main__":
