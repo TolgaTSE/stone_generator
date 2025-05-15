@@ -20,78 +20,68 @@ st.set_page_config(
 Image.MAX_IMAGE_PIXELS = None
 
 def load_large_image(uploaded_file):
-    """Handle large TIFF files with arbitrary extra dimensions."""
+    """Handle large TIFF files, convert CMYK (first 4 channels) to RGB if present."""
     temp_path = "temp.tif"
     try:
         st.info("Loading image... This may take a moment for large files.")
-        # 1) Geçici olarak diske yaz
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # 2) tifffile ile oku
         with tifffile.TiffFile(temp_path) as tif:
             st.write("Reading TIFF metadata...")
             for page in tif.pages:
-                # BitsPerSample
                 try:
                     bps = page.bitspersample
                 except AttributeError:
                     bps = page.tags['BitsPerSample'].value
                 st.write(f"Bits per sample: {bps}")
+                st.write(f"Sample format: {page.sampleformat}")
+                st.write(f"Color space (Photometric): {getattr(page,'photometric','Unknown')}")
+                st.write(f"Samples per pixel: {getattr(page,'samplesperpixel','Unknown')}")
 
-                # SampleFormat
-                sf = page.sampleformat
-                st.write(f"Sample format: {sf}")
-
-                # Photometric
-                phot = getattr(page, 'photometric', 'Unknown')
-                st.write(f"Color space: {phot}")
-
-                # SamplesPerPixel
-                spp = getattr(page, 'samplesperpixel', 'Unknown')
-                st.write(f"Samples per pixel: {spp}")
-
-            # Ham array'i al
             img_array = tif.asarray()
-        
-        st.write(f"Original array shape: {img_array.shape}, dtype: {img_array.dtype}")
 
-        # 3) Fazla boyutları temizle (singleton dims)
+        st.write(f"Original array shape: {img_array.shape}, dtype: {img_array.dtype}")
         img_array = np.squeeze(img_array)
 
-        # 4) Planar (C, H, W) gelenleri (H, W, C) yap
+        # Eğer planar (C, H, W) gelmişse (örneğin shape[0] in (3,4,8)), (H,W,C) formatına çevir
         if img_array.ndim == 3 and img_array.shape[0] in (3, 4, 8):
-            # Burada 8 kanallı planar da (8, H, W) olabilir; transpose ile (H, W, 8)
             img_array = np.transpose(img_array, (1, 2, 0))
         st.write(f"Processed array shape: {img_array.shape}")
 
-        # 5) Kanal sayısına göre uygun dönüşüm
-        if img_array.ndim == 3 and img_array.shape[2] == 4:
-            # CMYK -> RGB
-            st.write("Converting CMYK to RGB...")
+        # 4 veya daha fazla kanallıysa CMYK dönüştürme: ilk 4 kanal C,M,Y,K kabul edilir
+        if img_array.ndim == 3 and img_array.shape[2] >= 4:
+            st.write(f"Image has {img_array.shape[2]} channels; treating first 4 as CMYK.")
+            cmyk = img_array[:, :, :4].astype(float)
+            # normalize 0–1
             if img_array.dtype != np.uint8:
-                img_array = ((img_array - img_array.min()) * (255.0 / (img_array.max() - img_array.min()))).astype(np.uint8)
-            cmyk = img_array.astype(float) / 255.0
+                cmyk = (cmyk - cmyk.min()) / (cmyk.max() - cmyk.min())
+            else:
+                cmyk /= 255.0
+
             c, m, y, k = cv2.split(cmyk)
-            r = (1.0 - c) * (1.0 - k)
-            g = (1.0 - m) * (1.0 - k)
-            b = (1.0 - y) * (1.0 - k)
+            r = (1 - c) * (1 - k)
+            g = (1 - m) * (1 - k)
+            b = (1 - y) * (1 - k)
             rgb = cv2.merge([r, g, b])
-            rgb = (rgb * 255).astype(np.uint8)
+            rgb = np.clip((rgb * 255), 0, 255).astype(np.uint8)
             image = Image.fromarray(rgb)
 
-        elif img_array.ndim == 3 and img_array.shape[2] > 4:
-            # Örneğin 8 kanallı: fazla kanalları atıp ilk 3’ü RGB kabul et
-            st.warning(f"Image has {img_array.shape[2]} channels; using first 3 as RGB.")
-            rgb_arr = img_array[:, :, :3]
-            image = Image.fromarray(rgb_arr)
-
-        else:
-            # 1 veya 3 kanallı (grayscale veya RGB) direkt
+        # Sadece 3 kanallıysa doğrudan RGB
+        elif img_array.ndim == 3 and img_array.shape[2] == 3:
             image = Image.fromarray(img_array)
 
+        # Tek kanallıysa gri ton olarak
+        elif img_array.ndim == 2:
+            image = Image.fromarray(img_array)
+
+        else:
+            st.error(f"Unexpected format after channel handling: {img_array.shape}")
+            image = None
+
         os.remove(temp_path)
-        st.success("Image loaded successfully!")
+        if image:
+            st.success("Image loaded successfully!")
         return image
 
     except Exception as e:
@@ -100,7 +90,7 @@ def load_large_image(uploaded_file):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-        # 6) Fallback: PIL bytes yöntemi
+        # Fallback: PIL ile yükleme
         try:
             st.write("Trying alternative loading method...")
             uploaded_file.seek(0)
@@ -115,41 +105,39 @@ def load_large_image(uploaded_file):
 
 def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, color_sensitivity):
     try:
-        img_array = np.array(image)
-        height, width = img_array.shape[:2]
-        new_image = img_array.copy()
+        arr = np.array(image)
+        h, w = arr.shape[:2]
+        new = arr.copy()
 
-        min_flake_size = int(20 * flake_size_range)
-        max_flake_size = int(200 * flake_size_range)
-        step_size = max(1, int(max_flake_size // (redistribution_intensity + 1)))
+        max_size = int(200 * flake_size_range)
+        step = max(1, max_size // (int(redistribution_intensity*10) + 1))
 
-        progress_bar = st.progress(0.0)
-        progress_text = st.empty()
-        total_steps = max(1, ((height - max_flake_size) // step_size) + 1)
-        current_step = 0
+        prog = st.progress(0.0)
+        info = st.empty()
+        total = max(1, ((h - max_size)//step)+1)
+        i = 0
 
-        for y in range(0, height - max_flake_size, step_size):
-            for x in range(0, width - max_flake_size, step_size):
-                roi = img_array[y:y+max_flake_size, x:x+max_flake_size]
-                variance = np.var(roi, axis=(0,1))
-                threshold = 500 * (1 - color_sensitivity)
-                if np.sum(variance) > threshold:
+        for y in range(0, h-max_size, step):
+            for x in range(0, w-max_size, step):
+                roi = arr[y:y+max_size, x:x+max_size]
+                var = np.var(roi, axis=(0,1))
+                thresh = 500 * (1-color_sensitivity)
+                if np.sum(var) > thresh:
                     flake = roi.copy()
-                    move_range = int(min(height, width) * redistribution_intensity)
-                    new_y = np.random.randint(max(0, y-move_range), min(height-max_flake_size, y+move_range))
-                    new_x = np.random.randint(max(0, x-move_range), min(width-max_flake_size, x+move_range))
-                    new_image[new_y:new_y+max_flake_size, new_x:new_x+max_flake_size] = flake
+                    rng = int(min(h,w)*redistribution_intensity)
+                    ny = np.random.randint(max(0,y-rng), min(h-max_size, y+rng))
+                    nx = np.random.randint(max(0,x-rng), min(w-max_size, x+rng))
+                    new[ny:ny+max_size, nx:nx+max_size] = flake
 
-            current_step += 1
-            progress = current_step / total_steps
-            progress_bar.progress(progress)
-            progress_text.text(f"Processing... {int(progress * 100)}%")
-
-            if current_step % 10 == 0:
+            i += 1
+            p = i/total
+            prog.progress(p)
+            info.text(f"Processing... {int(p*100)}%")
+            if i%10==0:
                 gc.collect()
 
-        progress_text.text("Processing complete!")
-        return Image.fromarray(new_image)
+        info.text("Processing complete!")
+        return Image.fromarray(new)
 
     except Exception as e:
         st.error(f"Error processing image: {e}")
@@ -157,54 +145,28 @@ def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, co
 
 def save_large_image(image, filename):
     try:
-        image.save(filename, "PNG", dpi=(300, 300))
+        image.save(filename, "PNG", dpi=(300,300))
     except Exception as e:
         st.error(f"Error saving image: {e}")
 
 def main():
     st.title("Stone Pattern Generator")
-    uploaded_file = st.file_uploader("Choose an image...", type=["tif", "tiff"])
-    if uploaded_file is not None:
-        st.write(f"Loading file: {uploaded_file.name}")
-        st.write(f"File size: {uploaded_file.size/(1024*1024):.2f} MB")
-
-        with st.spinner('Loading image...'):
-            image = load_large_image(uploaded_file)
-
-        if image:
-            st.image(image, caption="Original Image", use_column_width=True)
+    file = st.file_uploader("Choose an image...", type=["tif","tiff"])
+    if file:
+        st.write(f"Loading file: {file.name}")
+        st.write(f"Size: {file.size/(1024*1024):.2f} MB")
+        with st.spinner("Loading image..."):
+            img = load_large_image(file)
+        if img:
+            st.image(img, caption="Original", use_column_width=True)
             st.sidebar.header("Pattern Controls")
-            redistribution_intensity = st.sidebar.slider(
-                "Redistribution Intensity", 0.1, 1.0, 0.5,
-                help="How far flakes can move from original"
-            )
-            flake_size_range = st.sidebar.slider(
-                "Flake Size Range", 0.5, 2.0, 1.0,
-                help="Size range of detected flakes"
-            )
-            color_sensitivity = st.sidebar.slider(
-                "Color Sensitivity", 0.1, 1.0, 0.5,
-                help="Sensitivity to color variance"
-            )
-
+            ri = st.sidebar.slider("Redistribution Intensity",0.1,1.0,0.5)
+            fs = st.sidebar.slider("Flake Size Range",0.5,2.0,1.0)
+            cs = st.sidebar.slider("Color Sensitivity",0.1,1.0,0.5)
             if st.button("Generate New Design"):
-                with st.spinner('Generating new design...'):
-                    variation = detect_and_move_flakes(
-                        image, redistribution_intensity,
-                        flake_size_range, color_sensitivity
-                    )
-                    if variation:
-                        os.makedirs("generated_images", exist_ok=True)
+                with st.spinner("Generating..."):
+                    var = detect_and_move_flakes(img,ri,fs,cs)
+                    if var:
+                        os.makedirs("generated_images",exist_ok=True)
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fn = f"generated_images/variation_{ts}.png"
-                        save_large_image(variation, fn)
-                        st.image(variation, caption="New Design", use_column_width=True)
-                        with open(fn, 'rb') as f:
-                            st.download_button(
-                                label="Download New Design",
-                                data=f, file_name=f"new_design_{ts}.png",
-                                mime="image/png"
-                            )
-
-if __name__ == "__main__":
-    main()
+                        fn = f"
