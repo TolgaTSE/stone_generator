@@ -6,6 +6,7 @@ import io
 import os
 from datetime import datetime
 import gc
+import tifffile
 
 # Configure Streamlit
 st.set_page_config(
