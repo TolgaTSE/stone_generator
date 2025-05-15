@@ -21,23 +21,83 @@ with st.spinner('Initializing application...'):
     Image.MAX_IMAGE_PIXELS = None
 
 def load_large_image(uploaded_file):
-    """Handle CMYK TIFF files with proper color conversion"""
+    """Handle large CMYK TIFF files"""
     try:
         st.info("Loading image... This may take a moment for large files.")
         
-        # Try direct PIL opening from buffer
-        image = Image.open(uploaded_file)
-        if image.mode == 'CMYK':
-            st.info("Converting CMYK to RGB...")
-            image = image.convert('RGB')
+        # Save to temporary file
+        temp_path = "temp.tif"
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
         
-        st.success("Image loaded successfully!")
+        # Try different methods to load the image
+        try:
+            # Method 1: Using PIL with CMYK handling
+            with Image.open(temp_path) as img:
+                st.write(f"Original image mode: {img.mode}")
+                if img.mode == 'CMYK':
+                    img = img.convert('RGB')
+                image = img.copy()
+        except:
+            # Method 2: Using OpenCV
+            img_array = cv2.imread(temp_path, cv2.IMREAD_UNCHANGED)
+            if img_array is None:
+                raise Exception("Failed to load with OpenCV")
+                
+            # Convert from BGR to RGB
+            if len(img_array.shape) == 3:
+                if img_array.shape[2] == 4:  # CMYK
+                    # Convert CMYK to RGB
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_CMYK2BGR)
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+            
+            image = Image.fromarray(img_array)
+        
+        # Remove temporary file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        # Print debug information
+        st.write(f"Image size: {image.size}")
+        st.write(f"Image mode: {image.mode}")
+        
         return image
             
     except Exception as e:
         st.error(f"Error loading image: {str(e)}")
         st.error(f"File size: {uploaded_file.size / (1024*1024):.2f} MB")
-        return None
+        
+        # Try one last method with tifffile
+        try:
+            import tifffile
+            with tifffile.TiffFile(temp_path) as tif:
+                img_array = tif.asarray()
+                
+                # Convert to RGB if needed
+                if len(img_array.shape) == 3 and img_array.shape[2] == 4:  # CMYK
+                    # Convert to RGB using a simple conversion
+                    c, m, y, k = cv2.split(img_array)
+                    # CMYK to RGB conversion
+                    r = 255 * (1 - c/255) * (1 - k/255)
+                    g = 255 * (1 - m/255) * (1 - k/255)
+                    b = 255 * (1 - y/255) * (1 - k/255)
+                    
+                    img_array = cv2.merge([r, g, b]).astype(np.uint8)
+                
+                image = Image.fromarray(img_array)
+                return image
+                
+        except Exception as e2:
+            st.error(f"All methods failed: {str(e2)}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
+        
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
+
 
 def main():
     try:
