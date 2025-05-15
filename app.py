@@ -1,13 +1,14 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError, ImageCms
 import io
 import os
 import tempfile
 from datetime import datetime
 import gc
 import tifffile
+from io import BytesIO
 
 # Streamlit page settings
 st.set_page_config(
@@ -18,10 +19,52 @@ st.set_page_config(
 )
 Image.MAX_IMAGE_PIXELS = None  # Disable PIL pixel limit
 
+def cmyk_to_rgb(cmyk_arr):
+    """Improved CMYK to RGB conversion"""
+    cmyk = cmyk_arr.astype(np.float32) / 255.0
+    c, m, y, k = cv2.split(cmyk)
+    
+    # Adobe's CMYK to RGB conversion formula
+    r = 255 * (1.0 - c) * (1.0 - k)
+    g = 255 * (1.0 - m) * (1.0 - k)
+    b = 255 * (1.0 - y) * (1.0 - k)
+    
+    rgb = cv2.merge([r, g, b])
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+def apply_color_profile(image):
+    """Apply color profile conversion if available"""
+    if 'icc_profile' in image.info:
+        try:
+            srgb_profile = ImageCms.createProfile('sRGB')
+            img_profile = ImageCms.ImageCmsProfile(BytesIO(image.info['icc_profile']))
+            image = ImageCms.profileToProfile(image, img_profile, srgb_profile)
+            st.success("Color profile successfully applied")
+        except Exception as e:
+            st.warning(f"Color profile conversion failed: {e}")
+    return image
+
+def validate_color_space(image):
+    """Validate and correct color space if needed"""
+    if image.mode == 'CMYK':
+        st.warning("CMYK image detected, converting to RGB...")
+        return image.convert('RGB')
+    elif image.mode == 'RGB':
+        return image
+    else:
+        st.warning(f"Unexpected color mode: {image.mode}")
+        return image.convert('RGB')
+
+def debug_color_info(image):
+    """Display debug information about the image color space"""
+    st.write("Image Mode:", image.mode)
+    st.write("Color Space Info:", image.info.get('icc_profile') is not None)
+    arr = np.array(image)
+    st.write("Array Shape:", arr.shape)
+    st.write("Value Range:", arr.min(), "-", arr.max())
 
 def load_large_image(uploaded_file):
-    """Load TIFF via PIL CMYK→RGB, fallback to tifffile manual conversion. Uses a unique temp file."""
-    # Create a unique temporary file
+    """Load TIFF with improved color handling"""
     tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
     temp_path = tmp.name
     try:
@@ -31,50 +74,42 @@ def load_large_image(uploaded_file):
         tmp.close()
 
     try:
-        # 1) Try PIL composite
+        # Try PIL first
         try:
             with Image.open(temp_path) as img:
                 img.load()
-                rgb = img.convert('RGB')
-                st.success("Loaded via PIL CMYK→RGB")
+                if 'icc_profile' in img.info:
+                    rgb = apply_color_profile(img)
+                else:
+                    rgb = validate_color_space(img)
+                debug_color_info(rgb)
                 return rgb
         except (UnidentifiedImageError, Exception) as pil_err:
             st.write("PIL load failed:", pil_err)
 
-        # 2) Fallback: tifffile + manual conversion
+        # Fallback to tifffile
         with tifffile.TiffFile(temp_path) as tif:
-            page = tif.pages[0]
-            arr = page.asarray()
-        st.write(f"Raw array shape: {arr.shape}, dtype: {arr.dtype}")
+            arr = tif.pages[0].asarray()
+            arr = np.squeeze(arr)
+            
+            if arr.ndim == 3 and arr.shape[0] == 4:
+                arr = np.transpose(arr, (1, 2, 0))
+                rgb_arr = cmyk_to_rgb(arr)
+            else:
+                rgb_arr = arr
 
-        # Squeeze singleton dims
-        arr = np.squeeze(arr)
-        # Planar (C,H,W) -> Interleaved (H,W,C)
-        if arr.ndim == 3 and arr.shape[0] == 4:
-            arr = np.transpose(arr, (1, 2, 0))
-        st.write(f"Processed array shape: {arr.shape}")
-
-        # Manual CMYK -> RGB
-        cmyk = arr.astype(float) / 255.0
-        c, m, y, k = cv2.split(cmyk)
-        r = (1 - c) * (1 - k)
-        g = (1 - m) * (1 - k)
-        b = (1 - y) * (1 - k)
-        rgb_arr = np.clip((cv2.merge([r, g, b]) * 255), 0, 255).astype(np.uint8)
-        image = Image.fromarray(rgb_arr)
-        return image
+            image = Image.fromarray(rgb_arr)
+            return validate_color_space(image)
 
     except Exception as e:
         st.error(f"Image load error: {e}")
         return None
 
     finally:
-        # Clean up temp file
         try:
             os.remove(temp_path)
         except OSError:
             pass
-
 
 def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, color_sensitivity):
     """Detect and randomly move flake regions to create a new pattern."""
@@ -117,13 +152,11 @@ def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, co
         st.error(f"Processing error: {e}")
         return None
 
-
 def save_png(image, path):
     try:
         image.save(path, "PNG", dpi=(300,300))
     except Exception as e:
         st.error(f"PNG save error: {e}")
-
 
 def save_tiff(image, path):
     try:
@@ -131,10 +164,10 @@ def save_tiff(image, path):
     except Exception as e:
         st.error(f"TIFF save error: {e}")
 
-
 def main():
     st.title("Stone Pattern Generator")
     uploaded_file = st.file_uploader("Select a TIFF image...", type=["tif","tiff"])
+    
     if uploaded_file:
         st.write(f"File: {uploaded_file.name} ({uploaded_file.size/(1024*1024):.2f} MB)")
         with st.spinner("Loading image..."):
