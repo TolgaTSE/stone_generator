@@ -11,59 +11,39 @@ import tifffile
 # Increase PIL image size limit
 Image.MAX_IMAGE_PIXELS = None
 
-
-
 def load_large_image(uploaded_file):
-    """Handle large TIFF files using OpenCV while preserving colors"""
+    """Handle large TIFF files using tifffile"""
     try:
         # Save to temporary file
         temp_path = "temp.tif"
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        # Read with OpenCV, forcing 3-channel color
-        img_array = cv2.imread(temp_path, cv2.IMREAD_UNCHANGED)
+        # Read with tifffile
+        img_array = tifffile.imread(temp_path)
         
         # Remove temporary file
         os.remove(temp_path)
         
-        if img_array is None:
-            raise Exception("Failed to load image")
-        
-        # Handle different color channels
+        # Handle color channels
         if len(img_array.shape) == 2:  # Grayscale
             img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
         elif len(img_array.shape) == 3:
-            if img_array.shape[2] == 4:  # RGBA
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2RGB)
-            elif img_array.shape[2] == 3:  # BGR
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-            else:
-                raise Exception(f"Unexpected number of channels: {img_array.shape[2]}")
+            if img_array.shape[2] > 3:  # More than RGB channels
+                img_array = img_array[:, :, :3]  # Keep only RGB channels
+        
+        # Ensure correct data type
+        img_array = img_array.astype(np.uint8)
         
         # Convert to PIL Image
         image = Image.fromarray(img_array)
-        
-        # Clear memory
-        gc.collect()
         
         return image
             
     except Exception as e:
         st.error(f"Error loading image: {str(e)}")
         st.error(f"File size: {uploaded_file.size / (1024*1024):.2f} MB")
-        
-        # Try alternative method with PIL
-        try:
-            image = Image.open(io.BytesIO(uploaded_file.getvalue()))
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            return image
-            
-        except Exception as e2:
-            st.error(f"Alternative method also failed: {str(e2)}")
-            return None
-
+        return None
 
 
 
