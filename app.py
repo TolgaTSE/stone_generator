@@ -1,8 +1,7 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image, ImageCms
-import imageio.v2 as imageio
+from PIL import Image, ImageCms, UnidentifiedImageError
 import io
 import os
 from datetime import datetime
@@ -16,62 +15,51 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-Image.MAX_IMAGE_PIXELS = None  # PIL için limitsiz piksel
+Image.MAX_IMAGE_PIXELS = None  # limitsiz PIL piksel
 
 def load_large_image(uploaded_file):
-    """Önce imageio, sonra PIL/ICC, sonra tifffile+manuel CMYK→RGB ile yükleme."""
+    """TIFF içindeki gömülü ICC profiline göre CMYK→sRGB dönüşümü yapar,
+       spot-kanalları atar ve doğru renk tonlarını elde eder."""
     temp_path = "temp.tif"
     try:
-        # 1) Diske yaz
+        # 1) Geçici olarak diske yaz
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # 2) Önce imageio ile oku (fotoğrafçı yazılımlar gibi otomatik kompozit)
-        try:
-            arr = imageio.imread(temp_path)
-            st.success("Yüklendi via imageio.imread!")
-            img = Image.fromarray(arr)
-            os.remove(temp_path)
-            return img
-        except Exception as e_imgio:
-            st.write("imageio.imread başarısız:", e_imgio)
-
-        # 3) PIL ile doğrudan açmayı dene (bazı TIFF’lerde işe yarar)
+        # 2) Önce Pillow ile otomatik composite dene
         try:
             with Image.open(temp_path) as pil_img:
                 rgb = pil_img.convert("RGB")
-                st.success("Yüklendi via PIL composite!")
+                st.success("Yüklendi via Pillow composite!")
                 os.remove(temp_path)
                 return rgb
-        except Exception as e_pil:
-            st.write("PIL composite başarısız:", e_pil)
+        except UnidentifiedImageError as pil_err:
+            st.write("Pillow composite başarısız:", pil_err)
 
-        # 4) tifffile ile ham veriyi al
+        # 3) tifffile ile ham veriyi oku
         with tifffile.TiffFile(temp_path) as tif:
             page = tif.pages[0]
-            arr = page.asarray()  # tüm kanallar
+            arr = page.asarray()  # tüm kanallar: örn. (H, W, 8)
             tags = page.tags
 
         st.write(f"Ham dizi shape: {arr.shape}, dtype={arr.dtype}")
-
-        # 5) Fazla boyutları temizle ve planar→interleaved
+        # Fazla boyutları bırak
         arr = np.squeeze(arr)
+        # Planar → interleaved
         if arr.ndim == 3 and arr.shape[0] in (3, 4, 8):
             arr = np.transpose(arr, (1, 2, 0))
         st.write(f"İşlenmiş dizi shape: {arr.shape}")
 
-        # 6) Gömülü ICC profili oku
+        # Gömülü ICC profili al
         icc_profile = None
         if "ICCProfile" in tags:
             icc_profile = tags["ICCProfile"].value
             st.write("ICCProfile bulundu, renk yönetimi uygulanacak.")
 
-        # 7) Kanal sayısına göre dönüştür
+        # CMYK veya CMYK+spot → RGB
         if arr.ndim == 3 and arr.shape[2] >= 4:
-            # İlk 4 kanal = CMYK
             cmyk_arr = arr[..., :4].astype(np.uint8)
             if icc_profile:
-                # ICC profille CMYK→RGB
                 cmyk_img = Image.fromarray(cmyk_arr, mode="CMYK")
                 in_prof = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
                 out_prof = ImageCms.createProfile("sRGB")
@@ -80,7 +68,6 @@ def load_large_image(uploaded_file):
                 )
                 image = rgb_img
             else:
-                # Manuel formülle CMYK→RGB
                 cmyk = cmyk_arr.astype(float) / 255.0
                 c, m, y, k = cv2.split(cmyk)
                 r = (1 - c)*(1 - k)
@@ -95,11 +82,10 @@ def load_large_image(uploaded_file):
             image = Image.fromarray(arr)  # grayscale
         else:
             st.error(f"Beklenmeyen dizi formatı: {arr.shape}")
-            image = None
+            return None
 
         os.remove(temp_path)
-        if image:
-            st.success("Görüntü başarıyla yüklendi via tifffile fallback!")
+        st.success("Görüntü başarıyla yüklendi via tifffile fallback!")
         return image
 
     except Exception as e:
