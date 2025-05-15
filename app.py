@@ -8,24 +8,6 @@ from datetime import datetime
 import tifffile
 import gc
 
-# Configure Streamlit for large files
-st.set_option('server.maxUploadSize', 2048)
-
-# Rest of your existing code stays the same...
-
-# Configure Streamlit for large files
-# st.set_option('server.maxUploadSize', 2048)
-
-# Add memory monitoring
-def get_memory_usage():
-    process = psutil.Process(os.getpid())
-    return process.memory_info().rss / 1024 / 1024  # Convert to MB
-
-# Rest of your code remains the same...
-
-# Increase PIL image size limit
-Image.MAX_IMAGE_PIXELS = None
-
 def load_large_image(file):
     """Handle both TIFF and regular image files"""
     file_extension = file.name.lower().split('.')[-1]
