@@ -1,190 +1,158 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image, ImageCms, UnidentifiedImageError
+from PIL import Image
+from wand.image import Image as WandImage
 import io
 import os
 from datetime import datetime
 import gc
 import tifffile
 
-# Streamlit sayfa ayarları
+# Streamlit page configuration
 st.set_page_config(
     page_title="Stone Pattern Generator",
     page_icon="🎨",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-Image.MAX_IMAGE_PIXELS = None  # limitsiz PIL piksel
+Image.MAX_IMAGE_PIXELS = None  # Disable PIL max pixel limit
 
 def load_large_image(uploaded_file):
-    """TIFF içindeki gömülü ICC profiline göre CMYK→sRGB dönüşümü yapar,
-       spot-kanalları atar ve doğru renk tonlarını elde eder."""
+    """Composite all channels (CMYK + spot plates) via ImageMagick (wand), fallback to PIL."""
     temp_path = "temp.tif"
     try:
-        # 1) Geçici olarak diske yaz
+        # Write to disk
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # 2) Önce Pillow ile otomatik composite dene
+        # Try ImageMagick composite via Wand
+        try:
+            with WandImage(filename=temp_path) as wimg:
+                # Remove alpha and composite on white
+                wimg.background_color = 'white'
+                wimg.alpha_channel = 'remove'
+                blob = wimg.make_blob(format='png')
+                image = Image.open(io.BytesIO(blob))
+                st.success("Loaded via Wand/ImageMagick composite!")
+                os.remove(temp_path)
+                return image
+        except Exception as wand_e:
+            st.write("Wand composite failed:", wand_e)
+
+        # Fallback to PIL composite
         try:
             with Image.open(temp_path) as pil_img:
                 rgb = pil_img.convert("RGB")
-                st.success("Yüklendi via Pillow composite!")
+                st.success("Loaded via PIL composite!")
                 os.remove(temp_path)
                 return rgb
-        except UnidentifiedImageError as pil_err:
-            st.write("Pillow composite başarısız:", pil_err)
+        except Exception as pil_e:
+            st.error(f"PIL fallback failed: {pil_e}")
 
-        # 3) tifffile ile ham veriyi oku
-        with tifffile.TiffFile(temp_path) as tif:
-            page = tif.pages[0]
-            arr = page.asarray()  # tüm kanallar: örn. (H, W, 8)
-            tags = page.tags
-
-        st.write(f"Ham dizi shape: {arr.shape}, dtype={arr.dtype}")
-        # Fazla boyutları bırak
-        arr = np.squeeze(arr)
-        # Planar → interleaved
-        if arr.ndim == 3 and arr.shape[0] in (3, 4, 8):
-            arr = np.transpose(arr, (1, 2, 0))
-        st.write(f"İşlenmiş dizi shape: {arr.shape}")
-
-        # Gömülü ICC profili al
-        icc_profile = None
-        if "ICCProfile" in tags:
-            icc_profile = tags["ICCProfile"].value
-            st.write("ICCProfile bulundu, renk yönetimi uygulanacak.")
-
-        # CMYK veya CMYK+spot → RGB
-        if arr.ndim == 3 and arr.shape[2] >= 4:
-            cmyk_arr = arr[..., :4].astype(np.uint8)
-            if icc_profile:
-                cmyk_img = Image.fromarray(cmyk_arr, mode="CMYK")
-                in_prof = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
-                out_prof = ImageCms.createProfile("sRGB")
-                rgb_img = ImageCms.profileToProfile(
-                    cmyk_img, in_prof, out_prof, outputMode="RGB"
-                )
-                image = rgb_img
-            else:
-                cmyk = cmyk_arr.astype(float) / 255.0
-                c, m, y, k = cv2.split(cmyk)
-                r = (1 - c)*(1 - k)
-                g = (1 - m)*(1 - k)
-                b = (1 - y)*(1 - k)
-                rgb = (np.clip((cv2.merge([r, g, b]) * 255), 0, 255)).astype(np.uint8)
-                image = Image.fromarray(rgb)
-
-        elif arr.ndim == 3 and arr.shape[2] == 3:
-            image = Image.fromarray(arr)  # zaten RGB
-        elif arr.ndim == 2:
-            image = Image.fromarray(arr)  # grayscale
-        else:
-            st.error(f"Beklenmeyen dizi formatı: {arr.shape}")
-            return None
-
-        os.remove(temp_path)
-        st.success("Görüntü başarıyla yüklendi via tifffile fallback!")
-        return image
+        return None
 
     except Exception as e:
-        st.error(f"Görüntü yükleme hatası: {e}")
+        st.error(f"Error loading image: {e}")
         if os.path.exists(temp_path):
             os.remove(temp_path)
         return None
 
+
 def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, color_sensitivity):
-    """Pul benzeri bölgeleri algılayıp rastgele kaydırarak yeni taş deseni oluşturur."""
+    """Detect flake regions and randomly move them to create a new stone pattern."""
     try:
         arr = np.array(image)
         h, w = arr.shape[:2]
-        new = arr.copy()
+        new_arr = arr.copy()
 
         max_size = int(200 * flake_size_range)
         step = max(1, max_size // (int(redistribution_intensity * 10) + 1))
 
-        prog = st.progress(0.0)
-        info = st.empty()
-        total = max(1, ((h - max_size) // step) + 1)
-        i = 0
+        progress_bar = st.progress(0.0)
+        progress_text = st.empty()
+        total_steps = max(1, ((h - max_size) // step) + 1)
+        step_count = 0
 
         for y in range(0, h - max_size, step):
             for x in range(0, w - max_size, step):
                 roi = arr[y:y+max_size, x:x+max_size]
                 var = np.var(roi, axis=(0,1))
-                thresh = 500 * (1 - color_sensitivity)
-                if np.sum(var) > thresh:
+                threshold = 500 * (1 - color_sensitivity)
+                if np.sum(var) > threshold:
                     flake = roi.copy()
                     rng = int(min(h, w) * redistribution_intensity)
-                    ny = np.random.randint(max(0, y - rng), min(h - max_size, y + rng))
-                    nx = np.random.randint(max(0, x - rng), min(w - max_size, x + rng))
-                    new[ny:ny+max_size, nx:nx+max_size] = flake
+                    new_y = np.random.randint(max(0, y - rng), min(h - max_size, y + rng))
+                    new_x = np.random.randint(max(0, x - rng), min(w - max_size, x + rng))
+                    new_arr[new_y:new_y+max_size, new_x:new_x+max_size] = flake
 
-            i += 1
-            p = i / total
-            prog.progress(p)
-            info.text(f"İşleniyor... {int(p * 100)}%")
-            if i % 10 == 0:
+            step_count += 1
+            progress = step_count / total_steps
+            progress_bar.progress(progress)
+            progress_text.text(f"Processing... {int(progress*100)}%")
+            if step_count % 10 == 0:
                 gc.collect()
 
-        info.text("İşlem tamamlandı!")
-        return Image.fromarray(new)
+        progress_text.text("Processing complete!")
+        return Image.fromarray(new_arr)
 
     except Exception as e:
-        st.error(f"İşleme hatası: {e}")
+        st.error(f"Error processing image: {e}")
         return None
 
+
 def save_large_image(image, filename):
-    """PNG olarak kaydeder."""
+    """Save image as PNG with high DPI."""
     try:
         image.save(filename, "PNG", dpi=(300, 300))
     except Exception as e:
-        st.error(f"Kaydetme hatası: {e}")
+        st.error(f"Error saving image: {e}")
+
 
 def main():
     st.title("Stone Pattern Generator")
-    uploaded_file = st.file_uploader("Bir TIFF dosyası seçin...", type=["tif", "tiff"])
-    if uploaded_file:
-        st.write(f"Dosya: {uploaded_file.name}  •  Boyut: {uploaded_file.size/(1024*1024):.2f} MB")
-        with st.spinner("Görüntü yükleniyor..."):
+    uploaded_file = st.file_uploader("Choose a TIFF image...", type=["tif", "tiff"])
+    if uploaded_file is not None:
+        st.write(f"File: {uploaded_file.name} • Size: {uploaded_file.size/(1024*1024):.2f} MB")
+        with st.spinner("Loading image..."):
             image = load_large_image(uploaded_file)
 
-        if image:
-            st.image(image, caption="Orijinal Görüntü", use_column_width=True)
-            st.sidebar.header("Desen Kontrolleri")
+        if image is not None:
+            st.image(image, caption="Original Image", use_column_width=True)
+
+            st.sidebar.header("Pattern Controls")
             redistribution_intensity = st.sidebar.slider(
-                "Dağıtım Şiddeti", 0.1, 1.0, 0.5,
-                help="Pulların ne kadar uzaklığa taşınacağını ayarlar"
+                "Redistribution Intensity", 0.1, 1.0, 0.5,
+                help="How far flakes can move from their original position"
             )
             flake_size_range = st.sidebar.slider(
-                "Pul Boyutu Aralığı", 0.5, 2.0, 1.0,
-                help="Algılanan pul bölgelerinin boyutunu ayarlar"
+                "Flake Size Range", 0.5, 2.0, 1.0,
+                help="Size range of detected flakes"
             )
             color_sensitivity = st.sidebar.slider(
-                "Renk Duyarlılığı", 0.1, 1.0, 0.5,
-                help="Renk varyansına ne kadar duyarlı olunacağını belirler"
+                "Color Sensitivity", 0.1, 1.0, 0.5,
+                help="Sensitivity to color variance"
             )
 
-            if st.button("Yeni Tasarım Oluştur"):
-                with st.spinner("Tasarım oluşturuluyor..."):
+            if st.button("Generate New Design"):
+                with st.spinner("Generating design..."):
                     variation = detect_and_move_flakes(
                         image,
                         redistribution_intensity,
                         flake_size_range,
                         color_sensitivity
                     )
-                    if variation:
+                    if variation is not None:
                         os.makedirs("generated_images", exist_ok=True)
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fn = f"generated_images/variation_{ts}.png"
-                        save_large_image(variation, fn)
-                        st.image(variation, caption="Yeni Tasarım", use_column_width=True)
-                        with open(fn, "rb") as f:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"generated_images/variation_{timestamp}.png"
+                        save_large_image(variation, filename)
+                        st.image(variation, caption="New Design", use_column_width=True)
+                        with open(filename, 'rb') as f:
                             st.download_button(
-                                label="Tasarımı İndir",
+                                label="Download New Design",
                                 data=f,
-                                file_name=f"new_design_{ts}.png",
+                                file_name=f"new_design_{timestamp}.png",
                                 mime="image/png"
                             )
 
