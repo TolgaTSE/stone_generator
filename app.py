@@ -6,45 +6,31 @@ import io
 import os
 from datetime import datetime
 import gc
-import tempfile
 
 # Increase PIL image size limit
 Image.MAX_IMAGE_PIXELS = None
 
 def load_large_image(uploaded_file):
-    """Handle large TIFF files"""
+    """Handle large TIFF files using direct memory loading"""
     try:
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.tif') as tmp_file:
-            # Write uploaded file to temporary file
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_file.flush()
-            
-            # Open with PIL
-            image = Image.open(tmp_file.name)
-            
-            # Convert to RGB if needed
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Load the image into memory
-            image.load()
-            
-            # Remove temporary file
-            os.unlink(tmp_file.name)
-            
-            return image
+        # Read file bytes
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        
+        # Decode image
+        img_array = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        
+        if img_array is None:
+            raise Exception("Failed to load image")
+        
+        # Convert BGR to RGB
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image
+        return Image.fromarray(img_array)
             
     except Exception as e:
         st.error(f"Error loading image: {str(e)}")
         return None
-
-def process_in_chunks(image, chunk_size=2000):
-    """Process large images in chunks"""
-    width, height = image.size
-    x_chunks = (width + chunk_size - 1) // chunk_size
-    y_chunks = (height + chunk_size - 1) // chunk_size
-    return width, height, x_chunks, y_chunks, chunk_size
 
 def detect_and_move_flakes(image, redistribution_intensity, flake_size_range, color_sensitivity):
     try:
