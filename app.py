@@ -1,49 +1,90 @@
-import streamlit as st
-import cv2
+import tifffile
 import numpy as np
 from PIL import Image
+import cv2
+import streamlit as st
+import gc
 import io
 import os
-from datetime import datetime
-import gc
-import tifffile
-
-# Increase PIL image size limit
-Image.MAX_IMAGE_PIXELS = None
 
 def load_large_image(uploaded_file):
-    """Handle large TIFF files using tifffile"""
+    """Handle large TIFF files with color preservation"""
     try:
         # Save to temporary file
         temp_path = "temp.tif"
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        # Read with tifffile
-        img_array = tifffile.imread(temp_path)
-        
+        # Read TIFF metadata first
+        with tifffile.TiffFile(temp_path) as tif:
+            # Get basic metadata
+            is_rgb = tif.is_rgb
+            sample_format = tif.pages[0].tags.get('SampleFormat', None)
+            bits_per_sample = tif.pages[0].tags.get('BitsPerSample', None)
+            
+            st.write(f"Image info - RGB: {is_rgb}, Format: {sample_format}, Bits: {bits_per_sample}")
+            
+            # Read the image data
+            img_array = tif.asarray()
+            
         # Remove temporary file
         os.remove(temp_path)
         
-        # Handle color channels
+        # Print array info for debugging
+        st.write(f"Array shape: {img_array.shape}, dtype: {img_array.dtype}")
+        
+        # Handle different bit depths
+        if img_array.dtype != np.uint8:
+            # Normalize and convert to 8-bit
+            img_array = ((img_array - img_array.min()) * (255.0 / (img_array.max() - img_array.min()))).astype(np.uint8)
+        
+        # Handle different color formats
         if len(img_array.shape) == 2:  # Grayscale
             img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
         elif len(img_array.shape) == 3:
-            if img_array.shape[2] > 3:  # More than RGB channels
-                img_array = img_array[:, :, :3]  # Keep only RGB channels
+            if img_array.shape[2] == 4:  # RGBA
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+            elif img_array.shape[2] > 4:  # Multiple channels
+                # Take first three channels as RGB
+                img_array = img_array[:, :, :3]
+            elif img_array.shape[2] == 3:
+                # Ensure correct color order
+                if not is_rgb:
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
         
-        # Ensure correct data type
-        img_array = img_array.astype(np.uint8)
-        
-        # Convert to PIL Image
+        # Create PIL Image
         image = Image.fromarray(img_array)
+        
+        # Display color information
+        st.write("Color channels min/max values:")
+        for i, channel in enumerate(['Red', 'Green', 'Blue']):
+            if len(img_array.shape) == 3:
+                st.write(f"{channel}: {img_array[:,:,i].min()} to {img_array[:,:,i].max()}")
         
         return image
             
     except Exception as e:
         st.error(f"Error loading image: {str(e)}")
         st.error(f"File size: {uploaded_file.size / (1024*1024):.2f} MB")
-        return None
+        
+        # Try alternative method
+        try:
+            # Try PIL directly
+            image = Image.open(io.BytesIO(uploaded_file.getvalue()))
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            return image
+        except Exception as e2:
+            st.error(f"Alternative method also failed: {str(e2)}")
+            return None
+
+
+
+
+# Increase PIL image size limit
+Image.MAX_IMAGE_PIXELS = None
+
+
 
 
 
