@@ -169,4 +169,12 @@ def main():
                     if var:
                         os.makedirs("generated_images",exist_ok=True)
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fn = f"
+                        fn = f"generated_images/variation_{ts}.png"
+                        save_large_image(var, fn)
+                        st.image(var, caption="New Design", use_column_width=True)
+                        with open(fn,"rb") as f:
+                            st.download_button("Download New Design",f, file_name=f"new_design_{ts}.png",
+                                               mime="image/png")
+
+if __name__=="__main__":
+    main()
