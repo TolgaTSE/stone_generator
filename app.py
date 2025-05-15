@@ -54,18 +54,20 @@ def load_large_image(uploaded_file):
             # Ham array'i al
             img_array = tif.asarray()
         
-        # Orijinal shape'i göster
         st.write(f"Original array shape: {img_array.shape}, dtype: {img_array.dtype}")
 
-        # 3) Fazla boyutları temizle
+        # 3) Fazla boyutları temizle (singleton dims)
         img_array = np.squeeze(img_array)
-        # Planar (C, H, W) gelenleri (H, W, C) yap
-        if img_array.ndim == 3 and img_array.shape[0] in (3, 4):
+
+        # 4) Planar (C, H, W) gelenleri (H, W, C) yap
+        if img_array.ndim == 3 and img_array.shape[0] in (3, 4, 8):
+            # Burada 8 kanallı planar da (8, H, W) olabilir; transpose ile (H, W, 8)
             img_array = np.transpose(img_array, (1, 2, 0))
         st.write(f"Processed array shape: {img_array.shape}")
 
-        # 4) CMYK -> RGB kontrolü
+        # 5) Kanal sayısına göre uygun dönüşüm
         if img_array.ndim == 3 and img_array.shape[2] == 4:
+            # CMYK -> RGB
             st.write("Converting CMYK to RGB...")
             if img_array.dtype != np.uint8:
                 img_array = ((img_array - img_array.min()) * (255.0 / (img_array.max() - img_array.min()))).astype(np.uint8)
@@ -77,8 +79,15 @@ def load_large_image(uploaded_file):
             rgb = cv2.merge([r, g, b])
             rgb = (rgb * 255).astype(np.uint8)
             image = Image.fromarray(rgb)
+
+        elif img_array.ndim == 3 and img_array.shape[2] > 4:
+            # Örneğin 8 kanallı: fazla kanalları atıp ilk 3’ü RGB kabul et
+            st.warning(f"Image has {img_array.shape[2]} channels; using first 3 as RGB.")
+            rgb_arr = img_array[:, :, :3]
+            image = Image.fromarray(rgb_arr)
+
         else:
-            # Monokrom ya da RGB ise doğrudan
+            # 1 veya 3 kanallı (grayscale veya RGB) direkt
             image = Image.fromarray(img_array)
 
         os.remove(temp_path)
@@ -91,7 +100,7 @@ def load_large_image(uploaded_file):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-        # 5) Fallback: PIL bytes yöntemi
+        # 6) Fallback: PIL bytes yöntemi
         try:
             st.write("Trying alternative loading method...")
             uploaded_file.seek(0)
