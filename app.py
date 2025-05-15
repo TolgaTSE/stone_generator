@@ -36,12 +36,22 @@ def apply_color_profile(image):
     """Apply color profile conversion if available"""
     if 'icc_profile' in image.info:
         try:
-            srgb_profile = ImageCms.createProfile('sRGB')
-            img_profile = ImageCms.ImageCmsProfile(BytesIO(image.info['icc_profile']))
-            image = ImageCms.profileToProfile(image, img_profile, srgb_profile)
-            st.success("Color profile successfully applied")
+            # First convert CMYK to RGB
+            if image.mode == 'CMYK':
+                image = image.convert('RGB')
+            
+            # Then apply color profile
+            if 'icc_profile' in image.info:
+                input_profile = ImageCms.ImageCmsProfile(BytesIO(image.info['icc_profile']))
+                output_profile = ImageCms.createProfile('sRGB')
+                intent = ImageCms.Intent.PERCEPTUAL
+                image = ImageCms.profileToProfile(image, input_profile, output_profile, renderingIntent=intent)
+                st.success("Color profile successfully applied")
+            return image
         except Exception as e:
             st.warning(f"Color profile conversion failed: {e}")
+            # Fallback to simple conversion
+            return image.convert('RGB')
     return image
 
 def validate_color_space(image):
@@ -78,12 +88,15 @@ def load_large_image(uploaded_file):
         try:
             with Image.open(temp_path) as img:
                 img.load()
-                if 'icc_profile' in img.info:
-                    rgb = apply_color_profile(img)
+                # Simple CMYK to RGB conversion if color profile fails
+                if img.mode == 'CMYK':
+                    rgb = img.convert('RGB')
                 else:
-                    rgb = validate_color_space(img)
+                    rgb = img
+                
                 debug_color_info(rgb)
                 return rgb
+                
         except (UnidentifiedImageError, Exception) as pil_err:
             st.write("PIL load failed:", pil_err)
 
@@ -174,7 +187,7 @@ def main():
             image = load_large_image(uploaded_file)
 
         if image:
-            st.image(image, caption="Original", use_column_width=True)
+            st.image(image, caption="Original", use_container_width=True)
             st.sidebar.header("Controls")
             ri = st.sidebar.slider("Redistribution Intensity",0.1,1.0,0.5)
             fs = st.sidebar.slider("Flake Size Range",0.5,2.0,1.0)
@@ -190,7 +203,7 @@ def main():
                         tiff_path = f"generated_images/design_{ts}.tif"
                         save_png(var, png_path)
                         save_tiff(var, tiff_path)
-                        st.image(var, caption="New Design", use_column_width=True)
+                        st.image(var, caption="New Design", use_container_width=True)
                         with open(png_path,'rb') as f:
                             st.download_button("Download PNG", data=f, file_name=os.path.basename(png_path), mime="image/png")
                         with open(tiff_path,'rb') as f:
