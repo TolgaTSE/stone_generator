@@ -14,7 +14,7 @@ st.set_option('server.maxUploadSize', 2048)
 # Rest of your existing code stays the same...
 
 # Configure Streamlit for large files
-st.set_option('server.maxUploadSize', 2048)
+# st.set_option('server.maxUploadSize', 2048)
 
 # Add memory monitoring
 def get_memory_usage():
